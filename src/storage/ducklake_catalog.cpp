@@ -358,9 +358,14 @@ unique_ptr<CreateMacroInfo> CreateMacroInfoFromDucklake(ClientContext &context, 
 			macro_function->parameters.push_back(make_uniq<ColumnRefExpression>(param.parameter_name));
 			auto expr_type = DuckLakeTypes::FromString(param.default_value_type);
 			if (expr_type.id() != LogicalTypeId::UNKNOWN) {
-				auto casted_value = param.default_value.CastAs(context, expr_type);
-				auto casted_expr = make_uniq<ConstantExpression>(std::move(casted_value));
-				macro_function->default_parameters.insert(make_pair(param.parameter_name, std::move(casted_expr)));
+				if (param.default_value.IsNull()) {
+					auto null_expr = make_uniq<ConstantExpression>(Value(expr_type));
+					macro_function->default_parameters.insert(make_pair(param.parameter_name, std::move(null_expr)));
+				} else {
+					auto casted_value = param.default_value.CastAs(context, expr_type);
+					auto casted_expr = make_uniq<ConstantExpression>(std::move(casted_value));
+					macro_function->default_parameters.insert(make_pair(param.parameter_name, std::move(casted_expr)));
+				}
 			}
 			macro_function->types.push_back(DuckLakeTypes::FromString(param.parameter_type));
 		}

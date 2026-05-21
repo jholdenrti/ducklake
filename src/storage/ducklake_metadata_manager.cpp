@@ -438,7 +438,7 @@ vector<DuckLakeMacroImplementation> DuckLakeMetadataManager::LoadMacroImplementa
 				DuckLakeMacroParameters param;
 				param.parameter_name = StringValue::Get(param_struct_children[0]);
 				param.parameter_type = StringValue::Get(param_struct_children[1]);
-				param.default_value = StringValue::Get(param_struct_children[2]);
+				param.default_value = param_struct_children[2].IsNull() ? Value() : Value(StringValue::Get(param_struct_children[2]));
 				param.default_value_type = StringValue::Get(param_struct_children[3]);
 				impl_info.parameters.push_back(std::move(param));
 			}
@@ -2324,14 +2324,19 @@ INSERT INTO {METADATA_CATALOG}.ducklake_macro_impl values(%llu,%llu,'%s','%s','%
 			                                  macro.macro_id.index, impl_id, impl.dialect, impl.sql, impl.type);
 
 			for (idx_t param_id = 0; param_id < impl.parameters.size(); ++param_id) {
-				// Insert in the parameter table
 				auto &param = impl.parameters[param_id];
+				string default_value_sql;
+				if (param.default_value.IsNull()) {
+					default_value_sql = "NULL";
+				} else {
+					default_value_sql = "'" + param.default_value.ToString() + "'";
+				}
 				batch_query +=
 				    StringUtil::Format(R"(
-INSERT INTO {METADATA_CATALOG}.ducklake_macro_parameters values(%llu,%llu,%llu,'%s','%s','%s', '%s');
+INSERT INTO {METADATA_CATALOG}.ducklake_macro_parameters values(%llu,%llu,%llu,'%s','%s',%s, '%s');
 )",
 				                       macro.macro_id.index, impl_id, param_id, param.parameter_name,
-				                       param.parameter_type, param.default_value.ToString(), param.default_value_type);
+				                       param.parameter_type, default_value_sql, param.default_value_type);
 			}
 		}
 	}

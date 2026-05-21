@@ -1837,16 +1837,22 @@ void DuckLakeTransaction::GetNewMacroInfo(DuckLakeCommitState &commit_state, ref
 			parameter.parameter_name = impl->parameters[i]->GetName();
 			parameter.parameter_type = DuckLakeTypes::ToString(impl->types[i]);
 			if (impl->default_parameters.find(parameter.parameter_name) != impl->default_parameters.end()) {
-				auto value = impl->default_parameters[parameter.parameter_name]->ToString();
-				if (StringUtil::StartsWith(value, "'")) {
-					value = value.substr(1, value.size() - 2);
+				auto &default_expr = impl->default_parameters[parameter.parameter_name];
+				auto &const_expr = default_expr->Cast<ConstantExpression>();
+				auto &val = const_expr.GetValue();
+
+				if (val.IsNull()) {
+					parameter.default_value = Value();
+					parameter.default_value_type = DuckLakeTypes::ToString(val.type());
+				} else {
+					auto value = default_expr->ToString();
+					if (StringUtil::StartsWith(value, "'")) {
+						value = value.substr(1, value.size() - 2);
+					}
+					value = StringUtil::Replace(value, "'", "''");
+					parameter.default_value = value;
+					parameter.default_value_type = DuckLakeTypes::ToString(val.type());
 				}
-				value = StringUtil::Replace(value, "'", "''");
-
-				parameter.default_value = value;
-
-				parameter.default_value_type = DuckLakeTypes::ToString(
-				    impl->default_parameters[parameter.parameter_name]->Cast<ConstantExpression>().GetValue().type());
 			} else {
 				parameter.default_value_type = "unknown";
 			}
