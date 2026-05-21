@@ -1850,7 +1850,11 @@ void DuckLakeTransaction::GetNewMacroInfo(DuckLakeCommitState &commit_state, ref
 			auto default_it = impl->default_parameters.find(parameter.parameter_name);
 			if (default_it != impl->default_parameters.end()) {
 				auto &const_expr = default_it->second->Cast<ConstantExpression>();
-				parameter.default_value = const_expr.value.ToString();
+				if (const_expr.value.IsNull()) {
+					parameter.default_value = Value();
+				} else {
+					parameter.default_value = const_expr.value.ToString();
+				}
 				parameter.default_value_type = DuckLakeTypes::ToString(const_expr.value.type());
 			} else {
 				parameter.default_value_type = "unknown";
