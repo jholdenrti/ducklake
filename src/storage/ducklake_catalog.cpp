@@ -485,8 +485,13 @@ unique_ptr<CreateMacroInfo> CreateMacroInfoFromDucklake(ClientContext &context, 
 			auto &expression = expr_list[0]->Cast<ConstantExpression>();
 			auto expr_type = DuckLakeTypes::FromString(param.default_value_type);
 			if (expr_type.id() != LogicalTypeId::UNKNOWN) {
-				expression.value = expression.value.CastAs(context, expr_type);
-				macro_function->default_parameters.insert(make_pair(param.parameter_name, std::move(expr_list[0])));
+				if (param.default_value.IsNull()) {
+					auto null_expr = make_uniq<ConstantExpression>(Value(expr_type));
+					macro_function->default_parameters.insert(make_pair(param.parameter_name, std::move(null_expr)));
+				} else {
+					expression.value = expression.value.CastAs(context, expr_type);
+					macro_function->default_parameters.insert(make_pair(param.parameter_name, std::move(expr_list[0])));
+				}
 			}
 			macro_function->types.push_back(DuckLakeTypes::FromString(param.parameter_type));
 		}
