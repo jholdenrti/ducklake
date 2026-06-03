@@ -22,6 +22,11 @@ public:
 
 public:
 	DuckLakeInlineData(PhysicalPlan &physical_plan, PhysicalOperator &child, idx_t inline_row_limit);
+	//! Variant that sets the operator types explicitly instead of inheriting them from `child`. Used by
+	//! MERGE INTO ... WHEN NOT MATCHED, where the rows fed to the operator come from the merge action
+	//! expressions (physical columns) rather than from `child.types` (the insert op's BIGINT row-count).
+	DuckLakeInlineData(PhysicalPlan &physical_plan, PhysicalOperator &child, vector<LogicalType> types,
+	                   idx_t inline_row_limit);
 
 	idx_t inline_row_limit;
 	optional_ptr<DuckLakeInsert> insert;

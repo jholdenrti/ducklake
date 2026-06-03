@@ -15,6 +15,13 @@ DuckLakeInlineData::DuckLakeInlineData(PhysicalPlan &physical_plan, PhysicalOper
 	children.push_back(child);
 }
 
+DuckLakeInlineData::DuckLakeInlineData(PhysicalPlan &physical_plan, PhysicalOperator &child, vector<LogicalType> types,
+                                       idx_t inline_row_limit)
+    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, std::move(types), child.estimated_cardinality),
+      inline_row_limit(inline_row_limit) {
+	children.push_back(child);
+}
+
 enum class InlinePhase { INLINING_ROWS, EMITTING_PREVIOUSLY_INLINED_ROWS, PASS_THROUGH_ROWS };
 
 class InlineDataState : public OperatorState {

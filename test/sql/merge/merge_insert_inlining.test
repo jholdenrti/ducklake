@@ -1,0 +1,147 @@
+# name: test/sql/merge/merge_insert_inlining.test
+# description: MERGE INTO ... WHEN NOT MATCHED THEN INSERT inlines sub-limit rows instead of writing a file (issue #1168)
+# group: [merge]
+
+require ducklake
+
+require parquet
+
+test-env DATA_PATH __TEST_DIR__
+
+# Fixed metadata path (no {UUID}) so the re-attach near the end hits the same catalog.
+statement ok
+ATTACH 'ducklake:sqlite:${DATA_PATH}/merge_insert_inlining_meta.db' AS ducklake (DATA_PATH '${DATA_PATH}/merge_insert_inlining_files', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE Stock(item_id INTEGER, balance INTEGER);
+
+statement ok
+CREATE TABLE Buy(item_id INTEGER, volume INTEGER);
+
+# seed the target via a plain INSERT (inlined: 2 <= 10)
+statement ok
+INSERT INTO Stock VALUES (10, 2200), (20, 1900);
+
+# source rows: one matches (10), two do not (30, 40)
+statement ok
+INSERT INTO Buy VALUES (10, 1000), (30, 300), (40, 400);
+
+# nothing written to a file yet -- everything is inlined
+query I
+SELECT COUNT(*) FROM GLOB('${DATA_PATH}/merge_insert_inlining_files/**')
+----
+0
+
+# ---------------------------------------------------------------------------
+# 1. MERGE that only INSERTs (WHEN NOT MATCHED), sub-limit -> must stay inline
+# ---------------------------------------------------------------------------
+query I
+MERGE INTO Stock AS s USING Buy AS b ON s.item_id = b.item_id
+WHEN NOT MATCHED THEN INSERT VALUES (b.item_id, b.volume)
+----
+2
+
+query II
+FROM Stock ORDER BY item_id
+----
+10	2200
+20	1900
+30	300
+40	400
+
+# THE FIX: the 2 newly-inserted rows were inlined, so still zero files.
+# Pre-fix (#1168) this is 1 -- MERGE-insert always wrote a parquet file.
+query I
+SELECT COUNT(*) FROM GLOB('${DATA_PATH}/merge_insert_inlining_files/**')
+----
+0
+
+# the inserted rows report an inlined-data virtual filename, not a .parquet path
+query I
+SELECT COUNT(*) FROM Stock WHERE filename LIKE '%inlined%'
+----
+4
+
+# ---------------------------------------------------------------------------
+# 2. Combined UPDATE + INSERT (regression: the update path must still work
+#    alongside the new insert path), still sub-limit
+# ---------------------------------------------------------------------------
+statement ok
+INSERT INTO Buy VALUES (50, 500);
+
+# Buy = {10,30,40,50}; Stock = {10,20,30,40} -> 3 updates (10,30,40) + 1 insert (50) = 4 affected
+query I
+MERGE INTO Stock AS s USING Buy AS b ON s.item_id = b.item_id
+WHEN MATCHED THEN UPDATE SET balance = balance + b.volume
+WHEN NOT MATCHED THEN INSERT VALUES (b.item_id, b.volume)
+----
+4
+
+query II
+FROM Stock ORDER BY item_id
+----
+10	3200
+20	1900
+30	600
+40	800
+50	500
+
+query I
+SELECT COUNT(*) FROM GLOB('${DATA_PATH}/merge_insert_inlining_files/**')
+----
+0
+
+# ---------------------------------------------------------------------------
+# 3. MERGE that INSERTs MORE than the limit in one statement -> overflow must
+#    still spill to a parquet file (correctness of the >limit path)
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE BulkBuy(item_id INTEGER, volume INTEGER);
+
+statement ok
+INSERT INTO BulkBuy SELECT 100 + i, i FROM range(20) t(i);
+
+query I
+MERGE INTO Stock AS s USING BulkBuy AS b ON s.item_id = b.item_id
+WHEN NOT MATCHED THEN INSERT VALUES (b.item_id, b.volume)
+----
+20
+
+query I
+SELECT COUNT(*) FROM Stock
+----
+25
+
+# 20 rows in one statement exceeds the limit of 10 -> exactly one data file for Stock.
+# (Scope to the Stock table dir: BulkBuy's own 20-row seed also spilled a file of its own.)
+query I
+SELECT COUNT(*) FROM GLOB('${DATA_PATH}/merge_insert_inlining_files/main/Stock/**')
+----
+1
+
+# ---------------------------------------------------------------------------
+# 4. Values survive a fresh attach (the inlined rows were committed, not lost)
+# ---------------------------------------------------------------------------
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:sqlite:${DATA_PATH}/merge_insert_inlining_meta.db' AS ducklake (DATA_PATH '${DATA_PATH}/merge_insert_inlining_files', DATA_INLINING_ROW_LIMIT 10)
+
+query I
+SELECT COUNT(*) FROM ducklake.Stock
+----
+25
+
+query II
+FROM ducklake.Stock WHERE item_id IN (30, 50, 119) ORDER BY item_id
+----
+30	600
+50	500
+119	19

@@ -33,6 +33,12 @@ statement ok
 MERGE INTO t USING (SELECT 2 as id, '2025-03-20'::TIMESTAMP as ts) AS src ON t.id = src.id
 WHEN NOT MATCHED THEN INSERT *;
 
+# Since issue #1168, a sub-limit MERGE-insert is absorbed into the inline buffer instead of being
+# written straight to a partitioned file, so flush it to materialize the partitioned data file
+# before inspecting ducklake_file_partition_value.
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 # Verify data is correct
 query II
 SELECT * FROM t ORDER BY id
