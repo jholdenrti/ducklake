@@ -240,7 +240,9 @@ SinkFinalizeType DuckLakeMergeInsert::Finalize(Pipeline &pipeline, Event &event,
 	}
 
 	OperatorSinkFinalizeInput copy_finalize {*copy.sink_state, input.interrupt_state};
-	copy.Finalize(pipeline, event, context, copy_finalize);
+	if (copy.Finalize(pipeline, event, context, copy_finalize) == SinkFinalizeType::BLOCKED) {
+		throw InternalException("BLOCKED not supported in DuckLakeMerge");
+	}
 
 	FinalizeCopyToInsert(pipeline, event, context, copy, insert, input.interrupt_state);
 	return SinkFinalizeType::READY;
@@ -458,7 +460,9 @@ SinkFinalizeType DuckLakeMergeUpdate::Finalize(Pipeline &pipeline, Event &event,
 	}
 
 	OperatorSinkFinalizeInput copy_finalize {*copy_op.sink_state, input.interrupt_state};
-	copy_op.Finalize(pipeline, event, context, copy_finalize);
+	if (copy_op.Finalize(pipeline, event, context, copy_finalize) == SinkFinalizeType::BLOCKED) {
+		throw InternalException("BLOCKED not supported in DuckLakeMerge");
+	}
 
 	FinalizeCopyToInsert(pipeline, event, context, copy_op, insert_op, input.interrupt_state);
 	return SinkFinalizeType::READY;

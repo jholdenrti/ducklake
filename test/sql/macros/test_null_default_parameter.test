@@ -1,0 +1,63 @@
+# name: test/sql/macros/test_null_default_parameter.test
+# description: macro with an explicit NULL default parameter round-trips through metadata (issue: fts extension)
+# group: [macros]
+
+require ducklake
+
+require parquet
+
+test-env DATA_PATH __TEST_DIR__
+
+# Fixed metadata path (no {UUID}) so the re-attach near the end hits the same catalog.
+statement ok
+ATTACH 'ducklake:sqlite:${DATA_PATH}/null_default_meta.db' AS ducklake (DATA_PATH '${DATA_PATH}/null_default_files');
+
+statement ok
+USE ducklake
+
+# explicit NULL default -- pre-fix this failed to persist because the default's type is SQLNULL,
+# which DuckLakeTypes::ToString rejected.
+statement ok
+CREATE MACRO with_null(a := NULL) AS a;
+
+# the NULL default is stored with a NULL default_value and the "null" type marker (not the storage type table)
+query IIIIIII
+FROM __ducklake_metadata_ducklake.ducklake_macro_parameters;
+----
+1	0	0	a	unknown	NULL	null
+
+# using the default yields NULL; passing an argument overrides it
+query I
+SELECT with_null() IS NULL
+----
+true
+
+query I
+SELECT with_null(42)
+----
+42
+
+# ---------------------------------------------------------------------------
+# the macro and its NULL default survive a fresh attach (committed, not lost)
+# ---------------------------------------------------------------------------
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:sqlite:${DATA_PATH}/null_default_meta.db' AS ducklake (DATA_PATH '${DATA_PATH}/null_default_files');
+
+statement ok
+USE ducklake
+
+query I
+SELECT with_null() IS NULL
+----
+true
+
+query I
+SELECT with_null(7)
+----
+7

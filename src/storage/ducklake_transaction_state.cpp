@@ -481,7 +481,11 @@ void GetNewMacroInfo(DuckLakeCommitState &commit_state, reference<CatalogEntry> 
 				} else {
 					parameter.default_value = const_expr.value.ToString();
 				}
-				parameter.default_value_type = DuckLakeTypes::ToString(const_expr.value.type());
+				// An untyped NULL default has type SQLNULL, which is not a DuckLake storage type - store it as
+				// "null" here (and map it back in CreateMacroInfoFromDucklake) rather than widening DuckLakeTypes.
+				auto &value_type = const_expr.value.type();
+				parameter.default_value_type =
+				    value_type.id() == LogicalTypeId::SQLNULL ? "null" : DuckLakeTypes::ToString(value_type);
 			} else {
 				parameter.default_value_type = "unknown";
 			}

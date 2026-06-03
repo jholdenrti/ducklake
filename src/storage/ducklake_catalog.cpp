@@ -483,7 +483,10 @@ unique_ptr<CreateMacroInfo> CreateMacroInfoFromDucklake(ClientContext &context, 
 			}
 			macro_function->parameters.push_back(make_uniq<ColumnRefExpression>(param.parameter_name));
 			auto &expression = expr_list[0]->Cast<ConstantExpression>();
-			auto expr_type = DuckLakeTypes::FromString(param.default_value_type);
+			// "null" is the stored marker for an untyped NULL default (see GetNewMacroInfo); it is not a
+			// DuckLake storage type, so map it back here instead of going through DuckLakeTypes::FromString.
+			auto expr_type = param.default_value_type == "null" ? LogicalType(LogicalTypeId::SQLNULL)
+			                                                     : DuckLakeTypes::FromString(param.default_value_type);
 			if (expr_type.id() != LogicalTypeId::UNKNOWN) {
 				if (param.default_value.IsNull()) {
 					auto null_expr = make_uniq<ConstantExpression>(Value(expr_type));
