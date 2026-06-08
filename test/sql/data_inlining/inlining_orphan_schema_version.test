@@ -1,0 +1,104 @@
+# name: test/sql/data_inlining/inlining_orphan_schema_version.test
+# description: A lazily-created inlined table must be stamped with the table's own current schema version (which has a ducklake_schema_versions entry), not the global schema version. Regression: an orphan schema version made the read path fall back to the table's creation snapshot and read ALTER-added columns back as defaults once the global schema version advanced past the orphan.
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+# fixed filename (no {UUID}) so the re-ATTACH below targets the same database
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/inline_orphan.db
+
+test-env DATA_PATH __TEST_DIR__
+
+# create the table with inlining OFF, so no inlined table is registered up front
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '${DATA_PATH}/inline_orphan', METADATA_CATALOG 'meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE dl.t(id INTEGER, base VARCHAR)
+
+# row inserted before the column exists and before inlining is on -> written to parquet
+statement ok
+INSERT INTO dl.t VALUES (1, 'a')
+
+# advance the GLOBAL schema version via unrelated tables
+statement ok
+CREATE TABLE dl.o1(x INTEGER)
+
+statement ok
+CREATE TABLE dl.o2(x INTEGER)
+
+# ALTER t to add a column - this is t's most recent schema change, but it now sits
+# BELOW the global schema version pushed up by o1/o2
+statement ok
+ALTER TABLE dl.t ADD COLUMN added VARCHAR DEFAULT NULL
+
+statement ok
+CREATE TABLE dl.o3(x INTEGER)
+
+# turn inlining on (does not itself register an inlined table)
+statement ok
+CALL dl.set_option('data_inlining_row_limit', 100)
+
+statement ok
+CREATE TABLE dl.o4(x INTEGER)
+
+# first insert with inlining active and no inlined table registered -> lazy on-the-fly creation
+statement ok
+INSERT INTO dl.t VALUES (2, 'b', 'REALCONTENT')
+
+# the lazily-created inlined table must NOT be an orphan: its schema version must have a
+# matching ducklake_schema_versions entry for the table
+query I
+SELECT count(*) FROM meta.ducklake_inlined_data_tables idt
+WHERE NOT EXISTS (
+    SELECT 1 FROM meta.ducklake_schema_versions sv
+    WHERE sv.table_id = idt.table_id AND sv.schema_version = idt.schema_version
+)
+----
+0
+
+# the inlined table is stamped with t's own current schema version, which is strictly below the
+# global schema version (proving the two genuinely diverge in this scenario)
+query I
+SELECT idt.schema_version < (SELECT max(schema_version) FROM meta.ducklake_snapshot)
+FROM meta.ducklake_inlined_data_tables idt
+JOIN meta.ducklake_table t ON t.table_id = idt.table_id
+WHERE t.table_name = 't'
+----
+true
+
+# read immediately - correct (this passed even before the fix, via schema-cache masking)
+query III
+SELECT id, base, added FROM dl.t ORDER BY id
+----
+1	a	NULL
+2	b	REALCONTENT
+
+# advance the global schema version PAST the inlined table's schema version. Before the fix this
+# unmasked the orphan and the next read returned added = NULL for row 2.
+statement ok
+CREATE TABLE dl.o5(x INTEGER)
+
+statement ok
+CREATE TABLE dl.o6(x INTEGER)
+
+query III
+SELECT id, base, added FROM dl.t ORDER BY id
+----
+1	a	NULL
+2	b	REALCONTENT
+
+# re-attach (fresh catalog state) and confirm the inlined row still decodes correctly
+statement ok
+DETACH dl
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '${DATA_PATH}/inline_orphan', METADATA_CATALOG 'meta', OVERRIDE_DATA_PATH true)
+
+query III
+SELECT id, base, added FROM dl.t ORDER BY id
+----
+1	a	NULL
+2	b	REALCONTENT

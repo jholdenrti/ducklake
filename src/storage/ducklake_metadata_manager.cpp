@@ -2731,9 +2731,29 @@ string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_sna
 			// write the new inlined table
 			string inlined_tables;
 			string inlined_table_queries;
+			// Bump the global schema version so the commit advances catalog_version and subsequent reads
+			// reload the catalog (picking up this newly-created inlined table).
 			commit_snapshot.schema_version++;
+			// But stamp the inlined table with the table's CURRENT schema version - the one that has a
+			// matching ducklake_schema_versions entry - not the freshly-bumped global version, which owns
+			// no schema_versions row. An orphan version makes the read path's exact-match lookup fail,
+			// fall back to the table's creation snapshot, and read ALTER-added columns back as defaults
+			// once the global schema version advances past it.
+			DuckLakeSnapshot inlined_snapshot = commit_snapshot;
+			auto schema_version_query = StringUtil::Format(
+			    "SELECT MAX(schema_version) FROM {METADATA_CATALOG}.ducklake_schema_versions WHERE table_id = %d;",
+			    entry.table_id.index);
+			auto schema_version_result = transaction.Query(commit_snapshot, schema_version_query);
+			for (auto &row : *schema_version_result) {
+				// NULL only when the table has no committed schema_versions row yet (created in this same
+				// transaction); the inherited bumped value is then the correct fallback, matching the row
+				// InsertNewSchema writes for the new table.
+				if (!row.IsNull(0)) {
+					inlined_snapshot.schema_version = row.GetValue<idx_t>(0);
+				}
+			}
 			inlined_table_name =
-			    GetInlinedTableQueries(commit_snapshot, table_info, inlined_tables, inlined_table_queries);
+			    GetInlinedTableQueries(inlined_snapshot, table_info, inlined_tables, inlined_table_queries);
 			batch_query += "INSERT INTO {METADATA_CATALOG}.ducklake_inlined_data_tables VALUES " + inlined_tables + ";";
 			batch_query += inlined_table_queries;
 		}
