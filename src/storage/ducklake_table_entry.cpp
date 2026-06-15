@@ -648,7 +648,8 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(ClientContext &context, 
 	if (transaction.HasTransactionLocalInserts(GetTableId())) {
 		VerifyNoNullValues(context, transaction, *this, col);
 		table_info.constraints.push_back(make_uniq<NotNullConstraint>(col.Logical()));
-		auto new_entry = make_uniq<DuckLakeTableEntry>(*this, table_info, LocalChange::SetNull(field_id.GetFieldIndex()));
+		auto new_entry =
+		    make_uniq<DuckLakeTableEntry>(*this, table_info, LocalChange::SetNull(field_id.GetFieldIndex()));
 		return std::move(new_entry);
 	}
 
@@ -697,11 +698,12 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &tra
 	return std::move(new_entry);
 }
 
-unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &transaction, RenameColumnInfo &info) {
+unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(ClientContext &context, DuckLakeTransaction &transaction,
+                                                        RenameColumnInfo &info) {
 	auto &duck_catalog = ParentCatalog().Cast<DuckLakeCatalog>();
 	auto &duck_schema = ParentSchema().Cast<DuckLakeSchemaEntry>();
 	if (DuckLakeUtil::IsInlinedSystemColumn(info.new_name) &&
-	    duck_catalog.DataInliningRowLimit(duck_schema.GetSchemaId(), GetTableId()) > 0) {
+	    duck_catalog.DataInliningRowLimit(context, duck_schema.GetSchemaId(), GetTableId()) > 0) {
 		throw CatalogException(
 		    "Column name \"%s\" is reserved by DuckLake for internal use when data inlining is enabled. If "
 		    "you must use this column name, disable inlining by calling "
@@ -743,11 +745,12 @@ void DuckLakeTableEntry::RequireNextColumnId(DuckLakeTransaction &transaction) {
 	next_column_id = metadata_manager.GetNextColumnId(GetTableId());
 }
 
-unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &transaction, AddColumnInfo &info) {
+unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(ClientContext &context, DuckLakeTransaction &transaction,
+                                                        AddColumnInfo &info) {
 	auto &duck_catalog = ParentCatalog().Cast<DuckLakeCatalog>();
 	auto &duck_schema = ParentSchema().Cast<DuckLakeSchemaEntry>();
 	if (DuckLakeUtil::IsInlinedSystemColumn(info.new_column.Name()) &&
-	    duck_catalog.DataInliningRowLimit(duck_schema.GetSchemaId(), GetTableId()) > 0) {
+	    duck_catalog.DataInliningRowLimit(context, duck_schema.GetSchemaId(), GetTableId()) > 0) {
 		throw CatalogException(
 		    "Column name \"%s\" is reserved by DuckLake for internal use when data inlining is enabled. If "
 		    "you must use this column name, disable inlining by calling "
@@ -1304,7 +1307,8 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &tra
 		sort_field.sort_key_index = order_node_idx;
 		sort_field.expression = order_node.expression->ToString();
 		sort_field.dialect = "duckdb";
-		sort_field.sort_direction = order_node.type;
+		sort_field.sort_direction =
+		    order_node.type == OrderType::DESCENDING ? OrderType::DESCENDING : OrderType::ASCENDING;
 		sort_field.null_order = order_node.null_order;
 		sort_data->fields.push_back(sort_field);
 	}
@@ -1338,9 +1342,9 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::Alter(ClientContext &context, DuckL
 	case AlterTableType::DROP_NOT_NULL:
 		return AlterTable(transaction, info.Cast<DropNotNullInfo>());
 	case AlterTableType::RENAME_COLUMN:
-		return AlterTable(transaction, info.Cast<RenameColumnInfo>());
+		return AlterTable(context, transaction, info.Cast<RenameColumnInfo>());
 	case AlterTableType::ADD_COLUMN:
-		return AlterTable(transaction, info.Cast<AddColumnInfo>());
+		return AlterTable(context, transaction, info.Cast<AddColumnInfo>());
 	case AlterTableType::REMOVE_COLUMN:
 		return AlterTable(transaction, info.Cast<RemoveColumnInfo>());
 	case AlterTableType::ALTER_COLUMN_TYPE:
