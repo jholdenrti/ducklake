@@ -17,37 +17,38 @@ mkdir -p "${BUILD_DIR}"
 
 # Ensure buildx is available and create a builder if needed
 if ! docker buildx inspect multiarch-builder >/dev/null 2>&1; then
-  echo "Creating docker buildx builder..."
-  docker buildx create --name multiarch-builder --use
+	echo "Creating docker buildx builder..."
+	docker buildx create --name multiarch-builder --use
 else
-  docker buildx use multiarch-builder
+	docker buildx use multiarch-builder
 fi
 
 # Function to build for a specific architecture
 build_arch() {
-  local arch=$1
-  local platform=$2
-  local suffix=$3
+	local arch=$1
+	local platform=$2
+	local suffix=$3
 
-  echo ""
-  echo "=== Building for ${arch} (${platform}) ==="
+	echo ""
+	echo "=== Building for ${arch} (${platform}) ==="
 
-  # Build and export the extension
-  docker buildx build \
-    --platform "${platform}" \
-    --target export \
-    --output "type=local,dest=${BUILD_DIR}/tmp_${arch}" \
-    --file "${SCRIPT_DIR}/Dockerfile" \
-    "${SCRIPT_DIR}"
+	# Build and export the extension
+	docker buildx build \
+		--platform "${platform}" \
+		--target export \
+		--output "type=local,dest=${BUILD_DIR}/tmp_${arch}" \
+		--file "${SCRIPT_DIR}/Dockerfile" \
+		"${SCRIPT_DIR}"
 
-  # Move and rename the extension with arch suffix
-  mv "${BUILD_DIR}/tmp_${arch}/${EXTENSION_NAME}.duckdb_extension" \
-    "${BUILD_DIR}/${EXTENSION_NAME}_${suffix}.duckdb_extension"
+	# Move and rename the extension with arch suffix
+	# (dot separator matches the GitHub release asset naming convention)
+	mv "${BUILD_DIR}/tmp_${arch}/${EXTENSION_NAME}.duckdb_extension" \
+		"${BUILD_DIR}/${EXTENSION_NAME}.${suffix}.duckdb_extension"
 
-  # Clean up temp directory
-  rmdir "${BUILD_DIR}/tmp_${arch}"
+	# Clean up temp directory
+	rmdir "${BUILD_DIR}/tmp_${arch}"
 
-  echo "Built: ${BUILD_DIR}/${EXTENSION_NAME}_${suffix}.duckdb_extension"
+	echo "Built: ${BUILD_DIR}/${EXTENSION_NAME}.${suffix}.duckdb_extension"
 }
 
 # Build for both architectures
