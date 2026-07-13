@@ -1,7 +1,9 @@
 #include "metadata_manager/quack_metadata_manager.hpp"
 #include "common/ducklake_util.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/valid_checker.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_staged_commit.hpp"
 #include "storage/ducklake_transaction.hpp"
@@ -23,9 +25,21 @@ unique_ptr<QueryResult> QuackMetadataManager::Query(string &query) {
 	                                  SQLString(query));
 	auto result = transaction.ExecuteRaw(std::move(wrapper));
 	if (result->HasError()) {
-		// cleanup
-		string reset = "ROLLBACK; BEGIN TRANSACTION;";
-		transaction.ExecuteRaw(reset);
+		// cleanup - but only when the failed statement actually aborted the metadata
+		// connection's transaction. Runtime errors abort it; bind-time errors (e.g. the
+		// "does this inlined-delete table exist" probes) leave it healthy. The reset's
+		// ROLLBACK discards every uncommitted metadata write staged earlier in this
+		// transaction (e.g. the flush path's DELETE of flushed inlined deletions), so
+		// resetting on a benign probe failure resurrects those rows after the commit
+		// and corrupts later compaction. With a pooled quack connection the server-side
+		// transaction mirrors the local abort state (a bind error leaves both healthy,
+		// a runtime error aborts both), so the local check covers both sides.
+		auto &metadata_context = *transaction.GetConnection().context;
+		if (metadata_context.transaction.HasActiveTransaction() &&
+		    ValidChecker::IsInvalidated(metadata_context.ActiveTransaction())) {
+			string reset = "ROLLBACK; BEGIN TRANSACTION;";
+			transaction.ExecuteRaw(reset);
+		}
 	}
 	return result;
 }
