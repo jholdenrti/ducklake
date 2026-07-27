@@ -276,6 +276,12 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 		ConflictCheck(table_id, other_changes.dropped_tables, "alter table", "dropped it");
 		ConflictCheck(table_id, other_changes.altered_tables, "alter table", "altered it");
 	}
+	for (auto &table_id : changes.noop_altered_tables) {
+		// nothing was written for these, but the ALTER was only a no-op relative to this transaction's
+		// snapshot - a concurrent ALTER means the requested state is not the state we would commit to
+		ConflictCheck(table_id, other_changes.dropped_tables, "alter table", "dropped it");
+		ConflictCheck(table_id, other_changes.altered_tables, "alter table", "altered it");
+	}
 	for (auto &view_id : changes.altered_views) {
 		ConflictCheck(view_id, other_changes.altered_views, "alter view", "altered it");
 	}
@@ -1621,7 +1627,7 @@ SnapshotDeletedFromFiles DuckLakeTransactionState::GetFilesDeletedOrDroppedAfter
 	return change_info;
 }
 
-void DuckLakeTransactionState::DropEmptySupersededInlinedTables(const DuckLakeCommitContext &context) {
+static void DropEmptySupersededInlinedTablesInternal(const DuckLakeCommitContext &context) {
 	// Superseded inlined tables.
 	string find_targets_sql = R"(
 SELECT idt.table_id, idt.schema_version, idt.table_name
@@ -1680,6 +1686,17 @@ WHERE idt.schema_version < (
 	}
 	for (auto &row : *snapshot_versions) {
 		context.invalidate_schema_cache(row.GetValue<idx_t>(0));
+	}
+}
+
+void DuckLakeTransactionState::DropEmptySupersededInlinedTables(const DuckLakeCommitContext &context) {
+	// every caller runs this after the metadata transaction has already committed, so letting an error out
+	// would report a durable commit as failed - or, on the commit-loop path, send it back through a retry
+	// that then conflicts with itself. This is opportunistic garbage collection: the tables it leaves
+	// behind stay valid and the next commit that flushes inlined data will try to reclaim them again.
+	try {
+		DropEmptySupersededInlinedTablesInternal(context);
+	} catch (const std::exception &) { // NOLINT: cleanup must never fail a committed transaction
 	}
 }
 

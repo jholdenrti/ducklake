@@ -190,6 +190,7 @@ public:
 	set<MacroIndex> dropped_table_macros;
 
 	set<TableIndex> renamed_tables;
+	set<TableIndex> noop_altered_tables;
 	set<TableIndex> renamed_views;
 	set<TableIndex> dropped_views;
 	unordered_map<string, DataFileIndex> dropped_files;

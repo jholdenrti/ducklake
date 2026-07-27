@@ -206,6 +206,8 @@ public:
 	optional_ptr<CatalogEntry> GetLocalEntryById(TableIndex table_id);
 
 	void AlterEntry(CatalogEntry &old_entry, unique_ptr<CatalogEntry> new_entry);
+	//! Record that an ALTER on this table was elided as a no-op, so it can still be conflict-checked
+	void AddNoopAlteredTable(TableIndex table_id);
 
 	DuckLakeCatalogSet &GetOrCreateTransactionLocalEntries(CatalogEntry &entry);
 	optional_ptr<DuckLakeCatalogSet> GetTransactionLocalSchemas();

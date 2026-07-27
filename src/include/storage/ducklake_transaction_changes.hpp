@@ -28,6 +28,10 @@ struct TransactionChangeInformation {
 
 	set<TableIndex> altered_tables;
 	set<TableIndex> altered_tables_with_schema_version_changes;
+	//! Tables whose ALTER was elided because it matched the state this transaction can see. Nothing is
+	//! written for these, but the "no change needed" conclusion was drawn from a snapshot that may since
+	//! have been superseded, so they still have to be conflict-checked against concurrent ALTERs.
+	set<TableIndex> noop_altered_tables;
 	set<TableIndex> altered_views;
 	set<TableIndex> dropped_tables;
 	set<TableIndex> dropped_views;

@@ -1,0 +1,146 @@
+# name: test/sql/alter/alter_then_rename_same_transaction.test
+# description: Renaming a committed table after another ALTER in the same transaction must keep both changes
+# group: [alter]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/alter_then_rename', METADATA_CATALOG 'ducklake_metadata')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(a INTEGER, b VARCHAR);
+
+statement ok
+INSERT INTO t VALUES (1, 'x');
+
+# SET PARTITIONED BY followed by a rename: the rename used to discard the partition change and
+# re-create the table without retiring the old row, which duplicated the columns
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE t SET PARTITIONED BY (a);
+
+statement ok
+ALTER TABLE t RENAME TO t2;
+
+statement ok
+COMMIT
+
+# the catalog must still be readable - a duplicated column list made every later query fail
+query II
+SELECT * FROM t2
+----
+1	x
+
+query I
+SELECT table_name FROM ducklake_metadata.ducklake_table WHERE end_snapshot IS NULL
+----
+t2
+
+# exactly one live column per name
+query II
+SELECT column_name, COUNT(*) FROM ducklake_metadata.ducklake_column
+WHERE end_snapshot IS NULL GROUP BY column_name ORDER BY column_name
+----
+a	1
+b	1
+
+# the partitioning requested before the rename must have survived
+query II
+SELECT pc.partition_key_index, c.column_name
+FROM ducklake_metadata.ducklake_partition_column pc
+JOIN ducklake_metadata.ducklake_partition_info pi USING (partition_id)
+JOIN ducklake_metadata.ducklake_column c ON c.column_id = pc.column_id AND c.table_id = pi.table_id
+WHERE pi.end_snapshot IS NULL AND c.end_snapshot IS NULL
+ORDER BY pc.partition_key_index
+----
+0	a
+
+# and new data must be written into that partition rather than carrying a transaction-local id
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 0);
+
+statement ok
+INSERT INTO t2 VALUES (2, 'y');
+
+query I
+SELECT COUNT(*) FROM ducklake_metadata.ducklake_data_file
+WHERE end_snapshot IS NULL AND partition_id IS NOT NULL AND partition_id >= 0
+----
+1
+
+# ADD COLUMN then rename: same chain, the added column must survive
+statement ok
+CREATE TABLE u(a INTEGER);
+
+statement ok
+INSERT INTO u VALUES (1);
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE u ADD COLUMN c INTEGER;
+
+statement ok
+ALTER TABLE u RENAME TO u2;
+
+statement ok
+COMMIT
+
+query II
+SELECT * FROM u2
+----
+1	NULL
+
+# COMMENT then rename
+statement ok
+CREATE TABLE v(a INTEGER);
+
+statement ok
+BEGIN
+
+statement ok
+COMMENT ON TABLE v IS 'kept';
+
+statement ok
+ALTER TABLE v RENAME TO v2;
+
+statement ok
+COMMIT
+
+query I
+SELECT comment FROM duckdb_tables() WHERE table_name = 'v2'
+----
+kept
+
+# renaming twice in one transaction must still only create the table once
+statement ok
+CREATE TABLE w(a INTEGER);
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE w RENAME TO w2;
+
+statement ok
+ALTER TABLE w2 RENAME TO w3;
+
+statement ok
+COMMIT
+
+query I
+SELECT COUNT(*) FROM ducklake_metadata.ducklake_table WHERE table_name = 'w3' AND end_snapshot IS NULL
+----
+1

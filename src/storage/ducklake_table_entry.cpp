@@ -632,6 +632,9 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &tra
 		partition_data->fields.push_back(partition_field);
 	}
 	if (PartitionFieldsMatch(GetPartitionData(), *partition_data)) {
+		// the table is already partitioned this way as far as this transaction can see, so there is nothing
+		// to write - but that verdict came from our snapshot, so it still has to be conflict-checked
+		transaction.AddNoopAlteredTable(GetTableId());
 		return nullptr;
 	}
 

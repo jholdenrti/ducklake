@@ -1,0 +1,90 @@
+# name: test/sql/transaction/partition_noop_alter_conflict.test
+# description: A SET PARTITIONED BY elided as a no-op must still conflict with a concurrent repartition
+# group: [transaction]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/noop_conflict', METADATA_CATALOG 'ducklake_metadata')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER)
+
+statement ok
+CREATE TABLE other(x INTEGER)
+
+statement ok
+ALTER TABLE t SET PARTITIONED BY (a)
+
+statement ok con1
+USE ducklake
+
+statement ok con2
+USE ducklake
+
+statement ok con1
+BEGIN
+
+# pin con1's snapshot: it sees t partitioned by (a)
+query II con1
+SELECT * FROM t
+----
+
+# con2 repartitions t to (b) and commits
+statement ok con2
+ALTER TABLE t SET PARTITIONED BY (b)
+
+# con1 does some unrelated work, then re-requests partitioning by (a). Against con1's snapshot that is
+# a no-op, so nothing is written for it - but committing it would silently leave t partitioned by (b),
+# discarding con1's explicit request, so it has to conflict instead.
+statement ok con1
+INSERT INTO other VALUES (1)
+
+statement ok con1
+ALTER TABLE t SET PARTITIONED BY (a)
+
+statement error con1
+COMMIT
+----
+Transaction conflict
+
+# con2's repartitioning is the one that stands
+query II
+SELECT pc.partition_key_index, c.column_name
+FROM ducklake_metadata.ducklake_partition_column pc
+JOIN ducklake_metadata.ducklake_partition_info pi USING (partition_id)
+JOIN ducklake_metadata.ducklake_column c ON c.column_id = pc.column_id AND c.table_id = pi.table_id
+WHERE pi.end_snapshot IS NULL AND c.end_snapshot IS NULL
+ORDER BY pc.partition_key_index
+----
+0	b
+
+# a no-op repartition with no concurrent ALTER must still commit without complaint
+statement ok con3
+USE ducklake
+
+statement ok con3
+BEGIN
+
+statement ok con3
+INSERT INTO other VALUES (2)
+
+statement ok con3
+ALTER TABLE t SET PARTITIONED BY (b)
+
+statement ok con3
+COMMIT
+
+query I
+SELECT COUNT(*) FROM other
+----
+1

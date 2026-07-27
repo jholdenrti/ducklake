@@ -893,6 +893,7 @@ TransactionChangeInformation DuckLakeTransaction::GetTransactionChanges() const 
 	auto &local_changes = state->local_changes;
 
 	TransactionChangeInformation changes;
+	changes.noop_altered_tables = state->noop_altered_tables;
 	for (auto &dropped_table_idx : dropped_tables) {
 		changes.dropped_tables.insert(dropped_table_idx);
 	}
@@ -1898,6 +1899,21 @@ void DuckLakeTransaction::AlterEntry(CatalogEntry &entry, unique_ptr<CatalogEntr
 	}
 }
 
+void DuckLakeTransaction::AddNoopAlteredTable(TableIndex table_id) {
+	if (table_id.IsTransactionLocal()) {
+		// the table only exists in this transaction, nobody else can have altered it
+		return;
+	}
+	state->noop_altered_tables.insert(table_id);
+}
+
+static LocalChangeType GetEntryLocalChange(CatalogEntry &entry) {
+	if (entry.type == CatalogType::VIEW_ENTRY) {
+		return entry.Cast<DuckLakeViewEntry>().GetLocalChange().type;
+	}
+	return entry.Cast<DuckLakeTableEntry>().GetLocalChange().type;
+}
+
 static void HandleRenameOldEntry(DuckLakeCatalogSet &entries, const string &old_name, const string &new_name,
                                  TableIndex id, bool entry_is_transaction_local, set<TableIndex> &renamed_set,
                                  const set<TableIndex> &dropped_set) {
@@ -1909,8 +1925,24 @@ static void HandleRenameOldEntry(DuckLakeCatalogSet &entries, const string &old_
 			new_entry_ptr->SetChild(std::move(dropped));
 		}
 	} else if (entry_is_transaction_local) {
-		// entry existed before this transaction and has already been renamed earlier in this txn
-		entries.DropEntry(old_name);
+		// entry existed before this transaction and already carries transaction-local changes - either an
+		// earlier rename, or another ALTER (e.g. ADD COLUMN / SET PARTITIONED BY)
+		auto dropped = entries.DropEntry(old_name);
+		// this rename supersedes any earlier one, so drop those chain entries to keep the entry from being
+		// re-created once per rename - but keep any other ALTER so it still reaches the commit
+		while (dropped && GetEntryLocalChange(*dropped) == LocalChangeType::RENAMED) {
+			dropped = dropped->TakeChild();
+		}
+		auto new_entry_ptr = entries.GetEntry(new_name);
+		if (new_entry_ptr && dropped) {
+			new_entry_ptr->SetChild(std::move(dropped));
+		}
+		// a committed entry is renamed by retiring its old row and re-creating it under the new name, so
+		// the retire still has to be registered if no earlier rename already did it
+		if (renamed_set.find(id) == renamed_set.end()) {
+			D_ASSERT(dropped_set.find(id) == dropped_set.end());
+			renamed_set.insert(id);
+		}
 	} else {
 		// first rename of a committed entry
 		// Invariant: an id cannot be both renamed and dropped in the same transaction.
