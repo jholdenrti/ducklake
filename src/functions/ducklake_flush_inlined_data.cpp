@@ -443,6 +443,7 @@ LEFT JOIN (
     WHERE table_id = %d AND {SNAPSHOT_ID} >= begin_snapshot
           AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
 ) existing_del ON del.file_id = existing_del.data_file_id
+WHERE del.begin_snapshot <= {SNAPSHOT_ID}
 	)",
 	                                                                       inlined_table_name, table_id.index));
 	if (deletions_result->HasError()) {
@@ -574,12 +575,18 @@ LEFT JOIN (
 	// Register the delete files
 	transaction.AddDeletes(table_id, std::move(delete_files));
 
-	// Delete the flushed inlined deletions
-	auto delete_result =
-	    transaction.Query(snapshot, StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s", inlined_table_name));
-	if (delete_result->HasError()) {
-		delete_result->GetErrorObject().Throw("Failed to delete inlined file deletions after flush: ");
-	}
+	// Remove the flushed inlined deletions the same way flushed inlined data is removed: now, so this
+	// transaction's own reads see them folded into the delete files above, and staged, so the commit applies
+	// them too. The immediate delete alone is not tied to the commit: a commit retry rolls the metadata
+	// transaction back and replays only staged changes, and a server-side commit runs on its own connection.
+	// Either way the delete files were registered while the inlined deletions they absorbed survived, so every
+	// flushed deletion was counted twice (negative count(*), compaction row-id underflow, resurrected rows).
+	// Scoped to the snapshot the deletions were read at: deletions committed later are not in those files.
+	DuckLakeInlinedTableInfo flushed_deletions;
+	flushed_deletions.table_name = inlined_table_name;
+	flushed_deletions.schema_version = 0;
+	transaction.DeleteFlushedInlinedData(flushed_deletions, snapshot.snapshot_id);
+	transaction.MarkInlinedDataForDeletion(std::move(flushed_deletions), snapshot.snapshot_id);
 }
 
 //===--------------------------------------------------------------------===//

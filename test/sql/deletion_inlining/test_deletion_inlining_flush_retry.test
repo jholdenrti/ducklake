@@ -1,0 +1,72 @@
+# name: test/sql/deletion_inlining/test_deletion_inlining_flush_retry.test
+# description: flushing inlined file deletions must remove them atomically with the commit, including on retry
+# group: [deletion_inlining]
+
+require notwindows
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/deletion_inlining_flush_retry', DATA_INLINING_ROW_LIMIT 10, METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+SET ducklake_retry_wait_ms=10
+
+# 50 rows > inlining limit: the data lands in a parquet file
+statement ok
+CREATE TABLE ducklake.t AS SELECT range a FROM range(50)
+
+statement ok
+CREATE TABLE ducklake.other (x INTEGER)
+
+# a handful of deletes against the parquet file are inlined
+statement ok
+DELETE FROM ducklake.t WHERE a < 5
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_inlined_delete_1
+----
+5
+
+# con1 flushes the inlined deletions into a delete file inside a transaction
+statement ok con1
+BEGIN
+
+statement ok con1
+CALL ducklake_flush_inlined_data('ducklake')
+
+# con2 commits first and takes the next snapshot id, so con1's commit must retry
+statement ok con2
+INSERT INTO ducklake.other VALUES (1)
+
+statement ok con1
+COMMIT
+
+# The flushed inlined deletions are gone: they live in the delete file now. Before the fix they were removed
+# by an ad-hoc statement that the commit retry rolled back, so every deletion was counted twice.
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_inlined_delete_1
+----
+0
+
+# count(*) is answered from metadata and must agree with a scan
+query I
+SELECT COUNT(*) FROM ducklake.t
+----
+45
+
+query I
+SELECT COUNT(*) FROM (SELECT a + 0 FROM ducklake.t)
+----
+45
+
+query I
+SELECT COUNT(*) FROM ducklake.t WHERE a < 5
+----
+0
