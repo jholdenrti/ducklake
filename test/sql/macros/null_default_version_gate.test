@@ -1,5 +1,5 @@
 # name: test/sql/macros/null_default_version_gate.test
-# description: NULL macro defaults are rejected on DuckLake 1.0 catalogs
+# description: Typed NULL macro defaults are rejected on DuckLake 1.0 catalogs (untyped ones are stored as on 1.1, see null_default_v1_0.test)
 # group: [macros]
 
 require ducklake
@@ -13,17 +13,6 @@ ATTACH 'ducklake:{TEST_DIR}/ducklake_macro_null_gate.db' AS ducklake (DATA_PATH 
 
 statement ok
 USE ducklake
-
-# the default's NULL type would be written as a column type 1.0 readers do not know
-statement error
-CREATE MACRO with_default(a, b := NULL) AS COALESCE(b, a)
-----
-DuckLake 1.0 does not support the NULL type
-
-statement error
-CREATE MACRO rows_for(v := NULL) AS TABLE SELECT v AS v
-----
-DuckLake 1.0 does not support the NULL type
 
 statement error
 CREATE MACRO typed_default(a, b := NULL::INTEGER) AS COALESCE(b, a)
@@ -50,7 +39,7 @@ USE memory
 statement ok
 DETACH ducklake
 
-# migrating the catalog unlocks NULL defaults
+# migrating the catalog unlocks typed NULL defaults
 statement ok
 ATTACH 'ducklake:{TEST_DIR}/ducklake_macro_null_gate.db' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_macro_null_gate', METADATA_CATALOG 'ducklake_macro_gate_meta', AUTOMATIC_MIGRATION TRUE)
 
@@ -58,14 +47,14 @@ statement ok
 USE ducklake
 
 statement ok
-CREATE MACRO rows_for(v := NULL) AS TABLE SELECT v AS v
+CREATE MACRO typed_default(a, b := NULL::INTEGER) AS COALESCE(b, a)
 
 query I
-FROM rows_for()
+SELECT typed_default(3)
 ----
-NULL
+3
 
 query I
-SELECT COUNT(*) FROM ducklake_macro_gate_meta.ducklake_macro_parameters WHERE default_value_type = 'null'
+SELECT COUNT(*) FROM ducklake_macro_gate_meta.ducklake_macro_parameters WHERE default_value = 'NULL' AND default_value_type = 'int32'
 ----
 1

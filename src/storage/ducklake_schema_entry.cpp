@@ -199,7 +199,11 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransactio
 		}
 		for (auto &entry : macro->default_parameters) {
 			Value default_value;
-			if (DuckLakeUtil::TryGetLiteralValue(*entry.second, default_value)) {
+			// An untyped NULL default (b := NULL) is stored as default_value 'NULL', default_value_type 'null' on
+			// every spec version and read back as a NULL constant, so 1.0 can store it too. Typed NULL defaults
+			// and NULL-typed columns stay 1.1-only.
+			if (DuckLakeUtil::TryGetLiteralValue(*entry.second, default_value) &&
+			    default_value.type().id() != LogicalTypeId::SQLNULL) {
 				DuckLakeTypes::CheckSupportedType(default_value.IsNull() ? LogicalType::SQLNULL : default_value.type(),
 				                                  version);
 			}

@@ -1,0 +1,220 @@
+# name: test/sql/macros/null_default_v1_0.test
+# description: Untyped NULL macro defaults on DuckLake 1.0 are stored as on 1.1, read back as NULL, survive the round trip through the 1.5 fork's representation and the 1.0 -> 1.1 migration
+# group: [macros]
+
+require ducklake
+
+require parquet
+
+test-env DATA_PATH {TEST_DIR}
+
+# reference: the same macros on a native DuckDB catalog
+statement ok
+CREATE MACRO memory.main.pick(a, b := NULL) AS COALESCE(b, a)
+
+statement ok
+CREATE MACRO memory.main.default_type(b := NULL) AS typeof(b)
+
+statement ok
+CREATE TEMP TABLE native AS SELECT memory.main.default_type() AS t, memory.main.pick(3) AS p
+
+query II
+FROM native
+----
+"NULL"	3
+
+# a fresh 1.1 catalog: unchanged behaviour, and the rows a 1.0 catalog must match
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/null_default_v11.db' AS dl11 (DATA_PATH '{DATA_PATH}/null_default_v11', METADATA_CATALOG 'meta11', DUCKLAKE_VERSION '1.1')
+
+statement ok
+USE dl11
+
+statement ok
+CREATE MACRO pick(a, b := NULL) AS COALESCE(b, a)
+
+statement ok
+CREATE MACRO default_type(b := NULL) AS typeof(b)
+
+statement ok
+CREATE MACRO rows_for(v := NULL) AS TABLE SELECT v AS v, typeof(v) AS t
+
+statement ok
+CREATE MACRO typed_default(a, b := NULL::INTEGER) AS COALESCE(b, a)
+
+statement ok
+USE memory
+
+statement ok
+DETACH dl11
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/null_default_v11.db' AS dl11 (DATA_PATH '{DATA_PATH}/null_default_v11', METADATA_CATALOG 'meta11', DUCKLAKE_VERSION '1.1')
+
+query III
+SELECT parameter_name, default_value, default_value_type FROM meta11.ducklake_macro_parameters
+JOIN meta11.ducklake_macro USING (macro_id) WHERE macro_name = 'pick' ORDER BY column_id
+----
+a	NULL	unknown
+b	NULL	null
+
+# the text 'NULL', not SQL NULL
+query I
+SELECT count(*) FROM meta11.ducklake_macro_parameters WHERE default_value IS NULL
+----
+0
+
+query III
+SELECT dl11.default_type(), dl11.pick(3), dl11.typed_default(3)
+----
+"NULL"	3	3
+
+statement ok
+CREATE TEMP TABLE v11_rows AS
+SELECT macro_name, column_id, parameter_name, parameter_type, default_value, default_value_type
+FROM meta11.ducklake_macro_parameters JOIN meta11.ducklake_macro USING (macro_id)
+WHERE macro_name <> 'typed_default'
+
+# a 1.0 catalog
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/null_default_v10.db' AS dl10 (DATA_PATH '{DATA_PATH}/null_default_v10', METADATA_CATALOG 'meta10', DUCKLAKE_VERSION '1.0')
+
+statement ok
+USE dl10
+
+statement ok
+CREATE MACRO pick(a, b := NULL) AS COALESCE(b, a)
+
+statement ok
+CREATE MACRO default_type(b := NULL) AS typeof(b)
+
+statement ok
+CREATE MACRO rows_for(v := NULL) AS TABLE SELECT v AS v, typeof(v) AS t
+
+# still 1.1-only: typed NULL defaults and the NULL column type
+statement error
+CREATE MACRO typed_default(a, b := NULL::INTEGER) AS COALESCE(b, a)
+----
+DuckLake 1.0 does not support the NULL type
+
+statement error
+CREATE TABLE null_col AS SELECT NULL AS c
+----
+DuckLake 1.0 does not support the NULL type
+
+# the rows are exactly the ones 1.1 writes
+query I
+SELECT count(*) FROM (
+    (SELECT macro_name, column_id, parameter_name, parameter_type, default_value, default_value_type
+     FROM meta10.ducklake_macro_parameters JOIN meta10.ducklake_macro USING (macro_id)
+     EXCEPT ALL FROM v11_rows)
+    UNION ALL
+    (FROM v11_rows EXCEPT ALL
+     SELECT macro_name, column_id, parameter_name, parameter_type, default_value, default_value_type
+     FROM meta10.ducklake_macro_parameters JOIN meta10.ducklake_macro USING (macro_id)))
+----
+0
+
+statement ok
+USE memory
+
+statement ok
+DETACH dl10
+
+# re-attached on 1.0 (no migration), the default is SQL NULL, not the text 'NULL'
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/null_default_v10.db' AS dl10 (DATA_PATH '{DATA_PATH}/null_default_v10', METADATA_CATALOG 'meta10', DUCKLAKE_VERSION '1.0')
+
+query I
+SELECT value FROM meta10.ducklake_metadata WHERE key = 'version'
+----
+1.0
+
+query II
+SELECT dl10.default_type() AS t, dl10.pick(3) AS p EXCEPT FROM native
+----
+
+query II
+SELECT dl10.default_type(), dl10.pick(3, b := 4)
+----
+"NULL"	4
+
+query II
+FROM dl10.rows_for()
+----
+NULL	"NULL"
+
+statement ok
+DETACH dl10
+
+# rollback to the 1.5 fork reverses the cutover repair; it covers every row 1.0 now writes...
+statement ok
+ATTACH '{TEST_DIR}/null_default_v10.db' AS raw10
+
+statement ok
+UPDATE raw10.ducklake_macro_parameters SET default_value = NULL WHERE default_value = 'NULL'
+
+# ...leaving the fork's form: SQL NULL for the NULL default (type 'null') and for parameters without a default
+query III
+SELECT parameter_name, default_value IS NULL, default_value_type FROM raw10.ducklake_macro_parameters
+JOIN raw10.ducklake_macro USING (macro_id) WHERE macro_name = 'pick' ORDER BY column_id
+----
+a	true	unknown
+b	true	null
+
+query I
+SELECT count(*) FROM raw10.ducklake_macro_parameters WHERE default_value = 'NULL'
+----
+0
+
+# the cutover repair of a fork-written catalog restores the same rows, which read back as SQL NULL too
+statement ok
+UPDATE raw10.ducklake_macro_parameters SET default_value = 'NULL' WHERE default_value IS NULL
+
+statement ok
+DETACH raw10
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/null_default_v10.db' AS dl10 (DATA_PATH '{DATA_PATH}/null_default_v10', METADATA_CATALOG 'meta10', DUCKLAKE_VERSION '1.0')
+
+query II
+SELECT dl10.default_type() AS t, dl10.pick(3) AS p EXCEPT FROM native
+----
+
+query II
+FROM dl10.rows_for()
+----
+NULL	"NULL"
+
+statement ok
+DETACH dl10
+
+# migrated to 1.1: the rows are those of a native 1.1 write and behave the same
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/null_default_v10.db' AS dl10 (DATA_PATH '{DATA_PATH}/null_default_v10', METADATA_CATALOG 'meta10', DUCKLAKE_VERSION '1.1', AUTOMATIC_MIGRATION TRUE)
+
+query I
+SELECT value FROM meta10.ducklake_metadata WHERE key = 'version'
+----
+1.1
+
+query I
+SELECT count(*) FROM (
+    (SELECT macro_name, column_id, parameter_name, parameter_type, default_value, default_value_type
+     FROM meta10.ducklake_macro_parameters JOIN meta10.ducklake_macro USING (macro_id)
+     EXCEPT ALL FROM v11_rows)
+    UNION ALL
+    (FROM v11_rows EXCEPT ALL
+     SELECT macro_name, column_id, parameter_name, parameter_type, default_value, default_value_type
+     FROM meta10.ducklake_macro_parameters JOIN meta10.ducklake_macro USING (macro_id)))
+----
+0
+
+query II
+SELECT dl10.default_type() AS t, dl10.pick(3) AS p EXCEPT FROM native
+----
+
+query II
+FROM dl10.rows_for()
+----
+NULL	"NULL"
