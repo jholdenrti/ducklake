@@ -12,9 +12,17 @@ namespace duckdb {
 QuackMetadataManager::QuackMetadataManager(DuckLakeTransaction &transaction) : DuckLakeMetadataManager(transaction) {
 }
 
+std::recursive_mutex &QuackMetadataManager::QueryLock() {
+	auto &ducklake_catalog = transaction.GetCatalog();
+	if (ducklake_catalog.MetadataConnectionPerTransaction()) {
+		return transaction_query_lock;
+	}
+	return ducklake_catalog.GetMetadataQueryLock();
+}
+
 unique_ptr<QueryResult> QuackMetadataManager::Query(string &query) {
 	auto &ducklake_catalog = transaction.GetCatalog();
-	lock_guard<std::recursive_mutex> guard(ducklake_catalog.GetMetadataQueryLock());
+	lock_guard<std::recursive_mutex> guard(QueryLock());
 	auto schema_identifier = SQLQuotedIdentifier::ToString(ducklake_catalog.MetadataSchemaName());
 	SubstituteCatalogPlaceholders(query, schema_identifier);
 
@@ -57,7 +65,7 @@ unique_ptr<QueryResult> QuackMetadataManager::Execute(DuckLakeSnapshot snapshot,
 
 unique_ptr<QueryResult> QuackMetadataManager::ExecuteInTransaction(string &query) {
 	// hold the lock through the rollback
-	lock_guard<std::recursive_mutex> guard(transaction.GetCatalog().GetMetadataQueryLock());
+	lock_guard<std::recursive_mutex> guard(QueryLock());
 	return DuckLakeMetadataManager::ExecuteInTransaction(query);
 }
 
@@ -76,7 +84,7 @@ bool QuackMetadataManager::InlinedDeletionTableExists(const string &table_name) 
 }
 
 void QuackMetadataManager::ClearCache() {
-	lock_guard<std::recursive_mutex> guard(transaction.GetCatalog().GetMetadataQueryLock());
+	lock_guard<std::recursive_mutex> guard(QueryLock());
 	string clear = "CALL quack_clear_cache();";
 	transaction.ExecuteRaw(clear);
 }
@@ -93,6 +101,31 @@ void QuackMetadataManager::ProbeServerCapabilities() {
 	}
 	if (result->RowCount() > 0) {
 		transaction.GetCatalog().SetRetrialsServerSide(true);
+	}
+	ProbePooledConnection();
+}
+
+void QuackMetadataManager::ProbePooledConnection() {
+	// The quack client's quack_pool_status() reports the pool of each attached quack catalog; with pool_size > 1 it
+	// pins every transaction to a connection of its own. Anything else - a quack without the function, a pool_size
+	// of 1, a failed probe - keeps the catalog-wide lock.
+	auto &catalog = transaction.GetCatalog();
+	string exists = "SELECT 1 FROM duckdb_functions() WHERE function_name = 'quack_pool_status' LIMIT 1";
+	auto result = transaction.ExecuteRaw(exists);
+	if (!result->HasError() && result->RowCount() > 0) {
+		auto probe = StringUtil::Format("SELECT pool_size FROM quack_pool_status() WHERE catalog = %s",
+		                                SQLString::ToString(catalog.MetadataDatabaseName()));
+		result = transaction.ExecuteRaw(probe);
+	}
+	if (result->HasError()) {
+		// LCOV_EXCL_START
+		transaction.ExecuteRaw("ROLLBACK; BEGIN TRANSACTION;");
+		return;
+		// LCOV_EXCL_STOP
+	}
+	auto chunk = result->Fetch();
+	if (chunk && chunk->size() == 1 && chunk->ColumnCount() == 1 && chunk->GetValue(0, 0).GetValue<int64_t>() > 1) {
+		catalog.SetMetadataConnectionPerTransaction(true);
 	}
 }
 

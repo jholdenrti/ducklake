@@ -335,6 +335,14 @@ public:
 	void SetRetrialsServerSide(bool value) {
 		retrials_server_side = value;
 	}
+	//! Whether the metadata catalog runs each transaction on a connection of its own (a pooled quack catalog), so
+	//! the metadata statements of different transactions are not serialized behind metadata_query_lock
+	bool MetadataConnectionPerTransaction() const {
+		return metadata_connection_per_transaction;
+	}
+	void SetMetadataConnectionPerTransaction(bool value) {
+		metadata_connection_per_transaction = value;
+	}
 
 	Value GetLastCommittedSnapshotId() const {
 		lock_guard<mutex> guard(commit_lock);
@@ -442,6 +450,7 @@ private:
 	bool initialized = false;
 	//! Whether or not the metadata server can execute the commit retry loop server-side.
 	bool retrials_server_side = false;
+	bool metadata_connection_per_transaction = false;
 	//! Cache for inlined deletion table existence checks
 	mutex inlined_deletion_cache_lock;
 	//! Table IDs where the inlined deletion table is known to exist (permanent - never invalidated)

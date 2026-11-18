@@ -1,0 +1,99 @@
+# name: test/sql/quack/pooled_metadata_concurrency.test
+# description: Concurrent writers and readers over a pooled quack metadata catalog lose no writes, raise conflicts as errors and never reuse a snapshot id
+# group: [quack]
+
+# Needs the quack config and a quack client with pool_size (quack_pool_status()). A pool size above 1 runs the
+# metadata statements of different transactions concurrently; 1 runs the same workload behind the catalog lock.
+require-env DUCKLAKE_QUACK_POOL_SIZE
+
+require ducklake
+
+require parquet
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/pooled_metadata_concurrency', DATA_INLINING_ROW_LIMIT 0, METADATA_PARAMETERS MAP {'pool_size': '{DUCKLAKE_QUACK_POOL_SIZE}'})
+
+query I
+SELECT pool_size FROM quack_pool_status() WHERE catalog = '__ducklake_metadata_ducklake'
+----
+{DUCKLAKE_QUACK_POOL_SIZE}
+
+statement ok
+CREATE TABLE ducklake.appended(worker INTEGER, i INTEGER);
+
+statement ok
+CREATE TABLE ducklake.counter(n INTEGER);
+
+statement ok
+CREATE TABLE ducklake.counter_log(worker INTEGER, i INTEGER);
+
+statement ok
+INSERT INTO ducklake.counter VALUES (0);
+
+concurrentloop w 0 8
+
+statement ok
+SET ducklake_max_retry_count = 100
+
+statement ok
+SET ducklake_retry_wait_ms = 10
+
+loop i 0 10
+
+# appends never conflict: every one must land
+statement ok
+INSERT INTO ducklake.appended VALUES ({w}, {i})
+
+# every worker rewrites the same row: concurrent rewrites must fail with a conflict, never overwrite each other
+statement ok
+BEGIN
+
+statement ok
+UPDATE ducklake.counter SET n = n + 1
+
+statement ok
+INSERT INTO ducklake.counter_log VALUES ({w}, {i})
+
+statement maybe
+COMMIT
+----
+onflict
+
+# readers run their metadata queries alongside the writers, including a multi-scan table_changes
+statement ok
+SELECT count(*) FROM ducklake.appended
+
+statement ok
+SELECT count(*) FROM ducklake.table_changes('counter', 0, 4)
+
+endloop
+
+endloop
+
+query II
+SELECT count(*), count(DISTINCT (worker, i)) FROM ducklake.appended
+----
+80	80
+
+# an increment is committed with its log row or not at all
+query I
+SELECT (SELECT n FROM ducklake.counter) = (SELECT count(*) FROM ducklake.counter_log)
+----
+true
+
+# some rewrites won, the others were raised as conflicts
+query I
+SELECT count(*) BETWEEN 1 AND 79 FROM ducklake.counter_log
+----
+true
+
+# every commit took exactly one snapshot id: 5 for the setup, 80 appends and one per committed increment
+statement ok
+CREATE TEMP TABLE snapshots AS SELECT count(*) AS n, count(DISTINCT snapshot_id) AS ids FROM __ducklake_metadata_ducklake.ducklake_snapshot
+
+query II
+SELECT n = ids, n = 85 + (SELECT count(*) FROM ducklake.counter_log) FROM snapshots
+----
+true	true
